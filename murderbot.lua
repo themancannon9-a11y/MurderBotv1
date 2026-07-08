@@ -4,12 +4,13 @@ local PathfindingService = game:GetService("PathfindingService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
+local VIM = game:GetService("VirtualInputManager")
 
 local function readJSON(path)
-    local success, data = pcall(readfile, path)
-    if success then
-        local ok, json = pcall(HttpService.JSONDecode, HttpService, data)
-        return ok and json or {}
+    local ok, data = pcall(readfile, path)
+    if ok then
+        local ok2, json = pcall(HttpService.JSONDecode, HttpService, data)
+        return ok2 and json or {}
     end
     return {}
 end
@@ -73,46 +74,54 @@ end)
 
 local MapScanner = {}
 local waypoints = {}
-local scanRadius = 100
-local scanStep = 15
+local scanRadius = 120
+local scanStep = 20
+local lastScan = 0
 
 function MapScanner.scan()
+    if tick() - lastScan < 3 then return end
+    lastScan = tick()
     local char = LocalPlayer.Character
     if not char then return end
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root then return end
     local center = root.Position
-    local origin = center + Vector3.new(0, 2, 0)
+    local origin = center + Vector3.new(0,2,0)
     local newWaypoints = {}
     for angle = 0, 360, scanStep do
         local dir = Vector3.new(math.cos(math.rad(angle)), 0, math.sin(math.rad(angle)))
         local ray = Ray.new(origin, dir * scanRadius)
         local hit, pos = workspace:FindPartOnRayWithIgnoreList(ray, {char})
-        if not hit then
-            local wp = center + dir * (scanRadius * 0.8)
-            table.insert(newWaypoints, {pos = wp, type = "open"})
-        else
-            local left = Vector3.new(-dir.Z, 0, dir.X)
-            local rayLeft = Ray.new(origin + left * 3, dir * scanRadius)
-            local hitLeft = workspace:FindPartOnRayWithIgnoreList(rayLeft, {char})
-            local rayRight = Ray.new(origin + left * -3, dir * scanRadius)
-            local hitRight = workspace:FindPartOnRayWithIgnoreList(rayRight, {char})
-            if hitLeft and not hitRight then
-                table.insert(newWaypoints, {pos = pos + left * 3, type = "doorway_single"})
-            elseif not hitLeft and hitRight then
-                table.insert(newWaypoints, {pos = pos - left * 3, type = "doorway_single"})
+        if hit then
+            local leftDir = Vector3.new(-dir.Z, 0, dir.X)
+            local rayL = Ray.new(origin + leftDir * 4, dir * scanRadius)
+            local hitL = workspace:FindPartOnRayWithIgnoreList(rayL, {char})
+            local rayR = Ray.new(origin - leftDir * 4, dir * scanRadius)
+            local hitR = workspace:FindPartOnRayWithIgnoreList(rayR, {char})
+            if hitL and not hitR then
+                table.insert(newWaypoints, {pos = pos + leftDir * 3, type = "doorway"})
+            elseif not hitL and hitR then
+                table.insert(newWaypoints, {pos = pos - leftDir * 3, type = "doorway"})
+            elseif hitL and hitR then
+                table.insert(newWaypoints, {pos = pos, type = "doorway"})
             end
+        else
+            table.insert(newWaypoints, {pos = center + dir * (scanRadius*0.7), type = "open"})
         end
     end
     waypoints = newWaypoints
 end
 
-local CombatAI = {}
 local target = nil
 local aimSpeed = 0.25
 local state = "IDLE"
 local ambushPoint = nil
 local patienceEnd = 0
+local nextWaypointIndex = 1
+local pathWaypoints = {}
+local stuckCheck = 0
+local lastPos = Vector3.zero
+local throwCooldown = 0
 
 local function aimAt(position)
     if not position then return end
@@ -122,7 +131,7 @@ local function aimAt(position)
     Camera.CFrame = camCF:Lerp(newLook, aimSpeed)
 end
 
-local function moveTo(targetPosition)
+local function setMovementTarget(pos)
     local char = LocalPlayer.Character
     if not char then return end
     local humanoid = char:FindFirstChildOfClass("Humanoid")
@@ -131,94 +140,161 @@ local function moveTo(targetPosition)
     if not root then return end
     local path = PathfindingService:CreatePath()
     local success, err = pcall(function()
-        path:ComputeAsync(root.Position, targetPosition)
+        path:ComputeAsync(root.Position, pos)
     end)
     if success and path.Status == Enum.PathStatus.Success then
-        local waypoints = path:GetWaypoints()
-        for _, wp in ipairs(waypoints) do
-            humanoid:MoveTo(wp.Position)
-            humanoid.MoveToFinished:Wait(0.3)
+        pathWaypoints = {}
+        for _, wp in ipairs(path:GetWaypoints()) do
+            table.insert(pathWaypoints, wp.Position)
         end
+        nextWaypointIndex = 1
     else
-        humanoid:MoveTo(targetPosition)
+        pathWaypoints = {pos}
+        nextWaypointIndex = 1
+    end
+    stuckCheck = tick()
+    lastPos = root.Position
+end
+
+local function moveAlongPath()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    if #pathWaypoints == 0 then return end
+    if nextWaypointIndex > #pathWaypoints then return end
+
+    local targetWP = pathWaypoints[nextWaypointIndex]
+    humanoid:MoveTo(targetWP)
+    if (root.Position - targetWP).Magnitude < 3 then
+        nextWaypointIndex = nextWaypointIndex + 1
+    end
+    if tick() - stuckCheck > 2 then
+        if (root.Position - lastPos).Magnitude < 0.5 then
+            nextWaypointIndex = math.min(nextWaypointIndex + 1, #pathWaypoints)
+            stuckCheck = tick()
+        end
+        lastPos = root.Position
+        stuckCheck = tick()
     end
 end
 
-local function attack()
+local function attackMelee()
     local char = LocalPlayer.Character
     if not char then return end
     local tool = char:FindFirstChildOfClass("Tool")
     if tool then
         tool:Activate()
-        task.wait(0.3)
-        if tool.Parent then tool:Deactivate() end
+    else
+        VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        task.wait(0.05)
+        VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+    end
+end
+
+local function throwKnife()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and tool.Name == "Knife" then
+        VIM:SendMouseButtonEvent(1, 1, 0, true, game, 0)
+        task.wait(0.1)
+        VIM:SendMouseButtonEvent(1, 1, 0, false, game, 0)
+    end
+end
+
+local function updateThrow()
+    if localRole == "Murderer" and tick() > throwCooldown then
+        throwKnife()
+        throwCooldown = tick() + 2.5
     end
 end
 
 local function selectAmbushPoint(targetPlayer)
     if not targetPlayer or not targetPlayer.Character then return nil end
-    local tpos = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not tpos then return nil end
-    local bestDist = math.huge
-    local bestWp = nil
+    local tpos = targetPlayer.Character.HumanoidRootPart.Position
+    local myPos = LocalPlayer.Character.HumanoidRootPart.Position
+    local best = nil
+    local bestScore = -math.huge
     for _, wp in ipairs(waypoints) do
-        local distToTarget = (wp.pos - tpos.Position).Magnitude
-        local distToMe = (wp.pos - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
-        if distToTarget < 40 and distToMe < 80 and wp.type == "doorway_single" then
-            if distToMe < bestDist then
-                bestDist = distToMe
-                bestWp = wp
+        if wp.type == "doorway" then
+            local distToTarget = (wp.pos - tpos).Magnitude
+            local distToMe = (wp.pos - myPos).Magnitude
+            local score = -distToTarget*2 - distToMe
+            if distToTarget < 50 and distToMe < 80 then
+                if score > bestScore then
+                    bestScore = score
+                    best = wp
+                end
             end
         end
     end
-    return bestWp
+    return best
 end
 
 local function updateAI()
-    if not target then
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local myPos = root.Position
+
+    if not target or not GameSense.isAlive(target) then
         state = "IDLE"
+        target = nil
+        if localRole == "Innocent" then
+            if #waypoints > 0 then
+                local wp = waypoints[math.random(#waypoints)]
+                setMovementTarget(wp.pos)
+                moveAlongPath()
+            end
+        else
+            pathWaypoints = {}
+        end
         return
     end
-    local myPos = LocalPlayer.Character.HumanoidRootPart.Position
-    local targetPos = target.Character.HumanoidRootPart.Position
+
+    local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return end
+    local targetPos = targetRoot.Position
     local dist = (targetPos - myPos).Magnitude
 
     if state == "IDLE" then
         ambushPoint = selectAmbushPoint(target)
         if ambushPoint then
             state = "MOVING_TO_AMBUSH"
+            setMovementTarget(ambushPoint.pos)
         else
             state = "CHASE"
+            setMovementTarget(targetPos)
         end
     elseif state == "MOVING_TO_AMBUSH" then
-        moveTo(ambushPoint.pos)
-        if (myPos - ambushPoint.pos).Magnitude < 8 then
+        if ambushPoint and (myPos - ambushPoint.pos).Magnitude < 5 then
             state = "WAITING"
-            patienceEnd = tick() + math.random(6, 15)
+            patienceEnd = tick() + math.random(5,12)
+        else
+            moveAlongPath()
         end
     elseif state == "WAITING" then
-        if tick() > patienceEnd then
+        if tick() > patienceEnd or dist < 12 then
             state = "CHASE"
-        elseif dist < 15 then
-            state = "ATTACKING"
+            setMovementTarget(targetPos)
         end
     elseif state == "CHASE" then
-        moveTo(targetPos)
+        setMovementTarget(targetPos)
+        moveAlongPath()
         aimAt(target.Character.Head.Position)
-        if dist < 12 and localRole == "Murderer" then
-            attack()
-        elseif localRole == "Sheriff" then
-            attack()
+        if dist < 10 then
+            if localRole == "Murderer" then
+                attackMelee()
+                updateThrow()
+            elseif localRole == "Sheriff" then
+                attackMelee()
+            end
         end
-        if dist > 40 then state = "IDLE" end
-    elseif state == "ATTACKING" then
-        aimAt(target.Character.Head.Position)
-        moveTo(targetPos)
-        if dist < 12 and localRole == "Murderer" then
-            attack()
-        elseif localRole == "Sheriff" then
-            attack()
-        end
+        if dist > 60 then state = "IDLE" end
     end
 end
 
@@ -247,41 +323,27 @@ end
 
 function Recorder.recordFrame(stateData, actionData)
     if not recording then return end
-    table.insert(currentLog, {
-        timestamp = tick(),
-        state = stateData,
-        action = actionData
-    })
+    table.insert(currentLog, {timestamp = tick(), state = stateData, action = actionData})
     if tick() - lastTargetCheck > 60 then
         lastTargetCheck = tick()
-        if targetUserId then
-            local targetPlayer = Players:GetPlayerByUserId(targetUserId)
-            if not targetPlayer or not targetPlayer.Parent then
-                Recorder.stopRecording("target_left")
-            end
+        if targetUserId and not Players:GetPlayerByUserId(targetUserId) then
+            Recorder.stopRecording("target_left")
         end
     end
 end
 
 function Recorder.onLocalDeath()
     task.wait(5)
-    if targetUserId then
-        local target = Players:GetPlayerByUserId(targetUserId)
-        if not target or not target.Parent then
-            Recorder.stopRecording("target_left_after_death")
-        end
+    if targetUserId and not Players:GetPlayerByUserId(targetUserId) then
+        Recorder.stopRecording("target_left_after_death")
     end
 end
 
 local DeathLogger = {}
 local deathLogs = {}
-
 function DeathLogger.loadDeaths()
-    if isfile("murderbot/deathlog.json") then
-        deathLogs = readJSON("murderbot/deathlog.json")
-    end
+    if isfile("murderbot/deathlog.json") then deathLogs = readJSON("murderbot/deathlog.json") end
 end
-
 function DeathLogger.logDeath(logData)
     table.insert(deathLogs, logData)
     writeJSON("murderbot/deathlog.json", deathLogs)
@@ -290,46 +352,33 @@ end
 local Trainer = {}
 local modelPath = "murderbot/model.nn"
 local model = {}
-
 function Trainer.loadModel()
     if isfile(modelPath) then model = readJSON(modelPath) end
 end
-
 function Trainer.trainFromLogs()
-    local logFiles = listfiles("murderbot/logs/")
-    local allFrames = {}
-    for _, file in ipairs(logFiles) do
-        local data = readJSON(file)
-        for _, frame in ipairs(data) do
-            table.insert(allFrames, frame)
-        end
+    local files = listfiles("murderbot/logs/")
+    local all = {}
+    for _, f in ipairs(files) do
+        local data = readJSON(f)
+        for _, fr in ipairs(data) do table.insert(all, fr) end
     end
-    if #allFrames > 0 then
-        model.trained = true
-        writeJSON(modelPath, model)
-    end
+    if #all > 0 then model.trained = true; writeJSON(modelPath, model) end
 end
-
 function Trainer.processDeathLogs()
-    for _, deathLog in ipairs(deathLogs) do
-        for _, frame in ipairs(deathLog.frames or {}) do
-            model.deathAvoid = true
-        end
+    for _, dl in ipairs(deathLogs) do
+        model.deathData = true
     end
     writeJSON(modelPath, model)
 end
 
 local BackgroundReplayer = {}
 local replayThread = nil
-
 function BackgroundReplayer.start()
     if replayThread then return end
     replayThread = task.spawn(function()
         while true do
-            if #deathLogs > 0 then
-                Trainer.processDeathLogs()
-            end
-            task.wait(15)
+            if #deathLogs > 0 then Trainer.processDeathLogs() end
+            task.wait(20)
         end
     end)
 end
@@ -345,10 +394,13 @@ function botModule.start()
     DeathLogger.loadDeaths()
     Trainer.trainFromLogs()
     BackgroundReplayer.start()
+    local enemies = GameSense.getEnemies()
+    if #enemies > 0 then target = enemies[1]; Recorder.startRecording(target) end
 
     heartbeatConn = RunService.Heartbeat:Connect(function()
         if not active then heartbeatConn:Disconnect(); return end
         GameSense.detectRoles()
+        MapScanner.scan()
         local enemies = GameSense.getEnemies()
         if #enemies == 0 then
             target = nil
@@ -367,28 +419,26 @@ function botModule.start()
                     end
                 end
             end
+            if target and not recording then Recorder.startRecording(target) end
         end
-        MapScanner.scan()
         updateAI()
-        if recording then
+        if recording and target then
             local stateData = {
                 myPos = LocalPlayer.Character and LocalPlayer.Character:GetPivot().Position,
-                targetPos = target and target.Character and target.Character:GetPivot().Position,
+                targetPos = target.Character and target.Character:GetPivot().Position,
                 role = localRole,
                 state = state
             }
-            local actionData = { target = target and target.UserId }
+            local actionData = {target = target.UserId}
             Recorder.recordFrame(stateData, actionData)
         end
     end)
-    if target and #GameSense.getEnemies() > 0 then
-        Recorder.startRecording(target)
-    end
 end
 
 function botModule.stop()
     active = false
     if heartbeatConn then heartbeatConn:Disconnect() end
+    pathWaypoints = {}
     target = nil
     Recorder.stopRecording("bot_disabled")
 end
