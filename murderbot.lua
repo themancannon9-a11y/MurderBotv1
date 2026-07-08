@@ -64,7 +64,7 @@ end
 
 LocalPlayer.CharacterAdded:Connect(function(char)
     local function onChildAdded(child)
-        if child:IsA("Tool") then task.wait(0.1) GameSense.detectRoles() end
+        if child:IsA("Tool") then wait(0.1) GameSense.detectRoles() end
     end
     char.ChildAdded:Connect(onChildAdded)
     for _, child in ipairs(char:GetChildren()) do
@@ -127,6 +127,12 @@ local pathNodes = {}
 local throwCooldown = 0
 local strafeTimer = 0
 local strafeDir = 1
+
+local function pressKey1()
+    VIM:SendKeyEvent(true, "1", false, game)
+    wait(0.05)
+    VIM:SendKeyEvent(false, "1", false, game)
+end
 
 local function hasLineOfSight(posA, posB)
     local dir = (posB - posA).Unit
@@ -221,34 +227,39 @@ local function avoidWalls(moveDir)
     return moveDir
 end
 
+local function ensureKnifeEquipped()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and tool.Name == "Knife" then
+        return true
+    end
+    pressKey1()
+    wait(0.2)
+    tool = char:FindFirstChildOfClass("Tool")
+    return tool and tool.Name == "Knife"
+end
+
 local function clickMB1()
     VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+    wait(0.03)
     VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
 end
 
 local function clickMB2()
     VIM:SendMouseButtonEvent(1, 1, 0, true, game, 0)
+    wait(0.03)
     VIM:SendMouseButtonEvent(1, 1, 0, false, game, 0)
 end
 
 local function attackMelee()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool then
-        tool:Activate()
-    else
-        clickMB1()
-    end
+    if not ensureKnifeEquipped() then return end
+    clickMB1()
 end
 
 local function throwKnife()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool and tool.Name == "Knife" then
-        clickMB2()
-    end
+    if not ensureKnifeEquipped() then return end
+    clickMB2()
 end
 
 local function updateThrow()
@@ -399,7 +410,7 @@ function Recorder.recordFrame(stateData, actionData)
 end
 
 function Recorder.onLocalDeath()
-    task.wait(5)
+    wait(5)
     if targetUserId and not Players:GetPlayerByUserId(targetUserId) then
         Recorder.stopRecording("target_left_after_death")
     end
@@ -444,7 +455,7 @@ function BackgroundReplayer.start()
     replayThread = task.spawn(function()
         while true do
             if #deathLogs > 0 then Trainer.processDeathLogs() end
-            task.wait(20)
+            wait(20)
         end
     end)
 end
