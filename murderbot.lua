@@ -305,7 +305,7 @@ local function updateAI()
     if not target or not GameSense.isAlive(target) then
         state = "IDLE"
         target = nil
-        humanoid.MoveDirection = Vector3.zero
+        humanoid:Move(Vector3.zero)  -- Stop movement
         if localRole == "Innocent" and #doorways > 0 then
             computePath(doorways[math.random(#doorways)].pos)
         end
@@ -314,7 +314,7 @@ local function updateAI()
 
     local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
     if not targetRoot then
-        humanoid.MoveDirection = Vector3.zero
+        humanoid:Move(Vector3.zero)
         return
     end
     local targetPos = targetRoot.Position
@@ -367,7 +367,7 @@ local function updateAI()
         strafeTimer = strafeTimer - 0.05
     end
 
-    humanoid.MoveDirection = moveDir * humanoid.WalkSpeed
+    humanoid:Move(moveDir)  -- WASD‑style instant movement
     local lookDir = targetPos - myPos
     lookDir = Vector3.new(lookDir.X, 0, lookDir.Z)
     if lookDir.Magnitude > 0.1 then
@@ -518,7 +518,7 @@ function botModule.stop()
     if heartbeatConn then heartbeatConn:Disconnect() end
     if LocalPlayer.Character then
         local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if humanoid then humanoid.MoveDirection = Vector3.zero end
+        if humanoid then humanoid:Move(Vector3.zero) end
     end
     target = nil
     Recorder.stopRecording("bot_disabled")
