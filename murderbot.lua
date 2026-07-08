@@ -73,73 +73,104 @@ LocalPlayer.CharacterAdded:Connect(function(char)
 end)
 
 local MapScanner = {}
-local waypoints = {}
-local scanRadius = 120
-local scanStep = 20
-local lastScan = 0
+local doorways = {}
+local lastMapScan = 0
+local scanRadius = 150
+local scanStep = 15
+
+local function raycastIgnoreSelf(origin, direction, maxDist)
+    local char = LocalPlayer.Character
+    local ignore = char and {char} or {}
+    return workspace:FindPartOnRayWithIgnoreList(Ray.new(origin, direction), ignore)
+end
 
 function MapScanner.scan()
-    if tick() - lastScan < 3 then return end
-    lastScan = tick()
+    if tick() - lastMapScan < 5 then return end
+    lastMapScan = tick()
     local char = LocalPlayer.Character
     if not char then return end
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root then return end
     local center = root.Position
     local origin = center + Vector3.new(0,2,0)
-    local newWaypoints = {}
+    local newDoorways = {}
+
     for angle = 0, 360, scanStep do
         local dir = Vector3.new(math.cos(math.rad(angle)), 0, math.sin(math.rad(angle)))
-        local ray = Ray.new(origin, dir * scanRadius)
-        local hit, pos = workspace:FindPartOnRayWithIgnoreList(ray, {char})
+        local hit, hitPos = raycastIgnoreSelf(origin, dir, scanRadius)
         if hit then
             local leftDir = Vector3.new(-dir.Z, 0, dir.X)
+            local rightDir = -leftDir
             local rayL = Ray.new(origin + leftDir * 4, dir * scanRadius)
+            local rayR = Ray.new(origin + rightDir * 4, dir * scanRadius)
             local hitL = workspace:FindPartOnRayWithIgnoreList(rayL, {char})
-            local rayR = Ray.new(origin - leftDir * 4, dir * scanRadius)
             local hitR = workspace:FindPartOnRayWithIgnoreList(rayR, {char})
             if hitL and not hitR then
-                table.insert(newWaypoints, {pos = pos + leftDir * 3, type = "doorway"})
+                table.insert(newDoorways, {pos = hitPos + leftDir * 3, normal = leftDir})
             elseif not hitL and hitR then
-                table.insert(newWaypoints, {pos = pos - leftDir * 3, type = "doorway"})
+                table.insert(newDoorways, {pos = hitPos + rightDir * 3, normal = rightDir})
             elseif hitL and hitR then
-                table.insert(newWaypoints, {pos = pos, type = "doorway"})
+                table.insert(newDoorways, {pos = hitPos, normal = dir})
             end
-        else
-            table.insert(newWaypoints, {pos = center + dir * (scanRadius*0.7), type = "open"})
         end
     end
-    waypoints = newWaypoints
+    if #newDoorways > 0 then doorways = newDoorways end
 end
 
 local target = nil
-local aimSpeed = 0.25
+local aimSpeed = 0.22
 local state = "IDLE"
 local ambushPoint = nil
 local patienceEnd = 0
-local nextWaypointIndex = 1
 local pathWaypoints = {}
+local nextWaypointIndex = 1
 local stuckCheck = 0
 local lastPos = Vector3.zero
 local throwCooldown = 0
+local combatStrafing = 0
+local strafeDir = 0
 
-local function aimAt(position)
-    if not position then return end
-    local camCF = Camera.CFrame
-    local dir = (position - camCF.Position).Unit
-    local newLook = CFrame.lookAt(camCF.Position, camCF.Position + dir)
-    Camera.CFrame = camCF:Lerp(newLook, aimSpeed)
+local function hasLineOfSight(posA, posB)
+    local dir = (posB - posA).Unit
+    local dist = (posB - posA).Magnitude
+    local ray = Ray.new(posA, dir * dist)
+    local char = LocalPlayer.Character
+    local ignoreList = {char}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then table.insert(ignoreList, p.Character) end
+    end
+    local hit = workspace:FindPartOnRayWithIgnoreList(ray, ignoreList)
+    return not hit
 end
 
-local function setMovementTarget(pos)
+local function getPredictedHeadPos(player)
+    local char = player.Character
+    if not char then return nil end
+    local head = char:FindFirstChild("Head")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not head or not root then return nil end
+    local velocity = root.Velocity or Vector3.zero
+    local dist = (head.Position - Camera.CFrame.Position).Magnitude
+    local travelTime = dist / 100
+    return head.Position + velocity * travelTime
+end
+
+local function aimAt(pos)
+    if not pos then return end
+    local camCF = Camera.CFrame
+    local dir = (pos - camCF.Position).Unit
+    Camera.CFrame = camCF:Lerp(CFrame.lookAt(camCF.Position, camCF.Position + dir), aimSpeed)
+end
+
+local function setPathTo(pos)
     local char = LocalPlayer.Character
     if not char then return end
     local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
     local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    if not humanoid or not root then return end
+
     local path = PathfindingService:CreatePath()
-    local success, err = pcall(function()
+    local success = pcall(function()
         path:ComputeAsync(root.Position, pos)
     end)
     if success and path.Status == Enum.PathStatus.Success then
@@ -160,25 +191,39 @@ local function moveAlongPath()
     local char = LocalPlayer.Character
     if not char then return end
     local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
     local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    if not humanoid or not root then return end
     if #pathWaypoints == 0 then return end
     if nextWaypointIndex > #pathWaypoints then return end
 
     local targetWP = pathWaypoints[nextWaypointIndex]
     humanoid:MoveTo(targetWP)
+
     if (root.Position - targetWP).Magnitude < 3 then
         nextWaypointIndex = nextWaypointIndex + 1
     end
-    if tick() - stuckCheck > 2 then
-        if (root.Position - lastPos).Magnitude < 0.5 then
+
+    if tick() - stuckCheck > 1.5 then
+        local moved = (root.Position - lastPos).Magnitude
+        if moved < 0.5 then
             nextWaypointIndex = math.min(nextWaypointIndex + 1, #pathWaypoints)
             stuckCheck = tick()
         end
         lastPos = root.Position
         stuckCheck = tick()
     end
+end
+
+local function clickMB1()
+    VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+    task.wait(0.05)
+    VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+end
+
+local function clickMB2()
+    VIM:SendMouseButtonEvent(1, 1, 0, true, game, 0)
+    task.wait(0.05)
+    VIM:SendMouseButtonEvent(1, 1, 0, false, game, 0)
 end
 
 local function attackMelee()
@@ -188,9 +233,7 @@ local function attackMelee()
     if tool then
         tool:Activate()
     else
-        VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
-        task.wait(0.05)
-        VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+        clickMB1()
     end
 end
 
@@ -199,9 +242,7 @@ local function throwKnife()
     if not char then return end
     local tool = char:FindFirstChildOfClass("Tool")
     if tool and tool.Name == "Knife" then
-        VIM:SendMouseButtonEvent(1, 1, 0, true, game, 0)
-        task.wait(0.1)
-        VIM:SendMouseButtonEvent(1, 1, 0, false, game, 0)
+        clickMB2()
     end
 end
 
@@ -212,44 +253,68 @@ local function updateThrow()
     end
 end
 
-local function selectAmbushPoint(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return nil end
-    local tpos = targetPlayer.Character.HumanoidRootPart.Position
+local function selectAmbush()
+    if not target or not target.Character or not LocalPlayer.Character then return nil end
+    local targetPos = target.Character.HumanoidRootPart.Position
     local myPos = LocalPlayer.Character.HumanoidRootPart.Position
     local best = nil
     local bestScore = -math.huge
-    for _, wp in ipairs(waypoints) do
-        if wp.type == "doorway" then
-            local distToTarget = (wp.pos - tpos).Magnitude
-            local distToMe = (wp.pos - myPos).Magnitude
+    for _, door in ipairs(doorways) do
+        local dPos = door.pos
+        local distToTarget = (dPos - targetPos).Magnitude
+        local distToMe = (dPos - myPos).Magnitude
+        if distToTarget < 50 and distToMe < 100 then
             local score = -distToTarget*2 - distToMe
-            if distToTarget < 50 and distToMe < 80 then
-                if score > bestScore then
-                    bestScore = score
-                    best = wp
-                end
+            if score > bestScore then
+                bestScore = score
+                best = door
             end
         end
     end
     return best
 end
 
-local function updateAI()
+local function avoidWalls()
     local char = LocalPlayer.Character
     if not char then return end
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root then return end
+    local dir = root.Velocity
+    if dir.Magnitude < 0.5 then return end
+    dir = dir.Unit
+    local rayOrigin = root.Position + Vector3.new(0,1,0)
+    local rayDir = dir
+    local hit = raycastIgnoreSelf(rayOrigin, rayDir, 3)
+    if hit then
+        local left = Vector3.new(-dir.Z, 0, dir.X)
+        local right = -left
+        local hitL = raycastIgnoreSelf(rayOrigin, left, 2)
+        local hitR = raycastIgnoreSelf(rayOrigin, right, 2)
+        if not hitL then
+            root.Velocity = root.Velocity + left * 30
+        elseif not hitR then
+            root.Velocity = root.Velocity + right * 30
+        end
+    end
+end
+
+local function updateAI()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid then return end
     local myPos = root.Position
+
+    avoidWalls()
 
     if not target or not GameSense.isAlive(target) then
         state = "IDLE"
         target = nil
-        if localRole == "Innocent" then
-            if #waypoints > 0 then
-                local wp = waypoints[math.random(#waypoints)]
-                setMovementTarget(wp.pos)
-                moveAlongPath()
-            end
+        if localRole == "Innocent" and doorways[math.random(#doorways)] then
+            local wander = doorways[math.random(#doorways)].pos
+            setPathTo(wander)
+            moveAlongPath()
         else
             pathWaypoints = {}
         end
@@ -260,41 +325,56 @@ local function updateAI()
     if not targetRoot then return end
     local targetPos = targetRoot.Position
     local dist = (targetPos - myPos).Magnitude
+    local headPred = getPredictedHeadPos(target)
+    if headPred then aimAt(headPred) end
 
     if state == "IDLE" then
-        ambushPoint = selectAmbushPoint(target)
+        ambushPoint = selectAmbush()
         if ambushPoint then
             state = "MOVING_TO_AMBUSH"
-            setMovementTarget(ambushPoint.pos)
+            setPathTo(ambushPoint.pos)
         else
             state = "CHASE"
-            setMovementTarget(targetPos)
+            setPathTo(targetPos)
         end
     elseif state == "MOVING_TO_AMBUSH" then
-        if ambushPoint and (myPos - ambushPoint.pos).Magnitude < 5 then
+        if ambushPoint and (myPos - ambushPoint.pos).Magnitude < 6 then
             state = "WAITING"
-            patienceEnd = tick() + math.random(5,12)
+            patienceEnd = tick() + math.random(4,10)
         else
             moveAlongPath()
         end
     elseif state == "WAITING" then
-        if tick() > patienceEnd or dist < 12 then
+        if tick() > patienceEnd or dist < 15 then
             state = "CHASE"
-            setMovementTarget(targetPos)
+            setPathTo(targetPos)
         end
     elseif state == "CHASE" then
-        setMovementTarget(targetPos)
+        setPathTo(targetPos)
         moveAlongPath()
-        aimAt(target.Character.Head.Position)
-        if dist < 10 then
-            if localRole == "Murderer" then
-                attackMelee()
+
+        if hasLineOfSight(myPos + Vector3.new(0,1,0), targetRoot.Position + Vector3.new(0,1,0)) then
+            if dist < 12 then
+                if localRole == "Murderer" then
+                    attackMelee()
+                    updateThrow()
+                    combatStrafing = 1
+                    strafeDir = math.random() > 0.5 and 1 or -1
+                elseif localRole == "Sheriff" then
+                    attackMelee()
+                end
+            elseif dist < 30 and localRole == "Murderer" then
                 updateThrow()
-            elseif localRole == "Sheriff" then
-                attackMelee()
             end
         end
-        if dist > 60 then state = "IDLE" end
+
+        if combatStrafing > 0 then
+            local leftDir = Vector3.new(-targetRoot.Position.Z + myPos.Z, 0, targetRoot.Position.X - myPos.X).Unit
+            humanoid:MoveTo(myPos + leftDir * strafeDir * 3)
+            combatStrafing = combatStrafing - 0.05
+        end
+
+        if dist > 80 then state = "IDLE" end
     end
 end
 
@@ -394,6 +474,7 @@ function botModule.start()
     DeathLogger.loadDeaths()
     Trainer.trainFromLogs()
     BackgroundReplayer.start()
+    MapScanner.scan()
     local enemies = GameSense.getEnemies()
     if #enemies > 0 then target = enemies[1]; Recorder.startRecording(target) end
 
@@ -427,7 +508,7 @@ function botModule.start()
                 myPos = LocalPlayer.Character and LocalPlayer.Character:GetPivot().Position,
                 targetPos = target.Character and target.Character:GetPivot().Position,
                 role = localRole,
-                state = state
+                aiState = state
             }
             local actionData = {target = target.UserId}
             Recorder.recordFrame(stateData, actionData)
